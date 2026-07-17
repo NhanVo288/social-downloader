@@ -22,8 +22,8 @@ export const siteConfig = {
   foundingYear: 2024,
   author: {
     name: 'Nhan Vo',
-    url: 'https://github.com/NhanVo288',
-    email: 'boogado@yahoo.com',
+    url: 'https://vohuunhan.dpdns.org',
+    email: 'vnhan2808@gmail.com',
     twitter: '@NhanVo',
     jobTitle: 'Software Engineer',
   },
