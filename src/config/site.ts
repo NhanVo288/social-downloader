@@ -30,7 +30,7 @@ export const siteConfig = {
   links: {
     twitter: 'https://twitter.com/NhanVo',
     github: 'https://github.com/NhanVo288/social-downloader',
-    portfolio: 'https://github.com/NhanVo288',
+    portfolio: 'https://vohuunhan.dpdns.org',
   },
   twitterTag: '@NhanVo',
   keywords: [
