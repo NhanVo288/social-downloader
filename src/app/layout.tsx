@@ -132,10 +132,7 @@ export default function RootLayout({
         <link rel='dns-prefetch' href='https://pagead2.googlesyndication.com' />
         <meta name='msapplication-TileColor' content='#7c3aed' />
         <meta name='google-adsense-account' content='ca-pub-3842960431278714' />
-        <meta
-          name='google-site-verification'
-          content='aha64Aa3HDSFKw-xDlfpIGcBkGRU4lRV9xU-qR2SPwc'
-        />
+        <meta name="google-site-verification" content="HmEtwhedQjrxN-95ay7beez-6kBR0Ks8Jrc_35rmwoo" />
         <script
           type='application/ld+json'
           dangerouslySetInnerHTML={{
