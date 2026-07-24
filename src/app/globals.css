@@ -1,15 +1,24 @@
 @import 'tailwindcss';
 
+/* ---------------------------------------------------------------------------
+   Ink + Cyan theme. Near-black graphite ground, a single electric-cyan accent,
+   one locked gradient. Replaces the old purple-gradient look.
+--------------------------------------------------------------------------- */
+:root {
+  --base: #08080a;
+  --panel: #101014;
+  --panel-2: #17171d;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(56, 211, 238, 0.3);
+  --txt: #fafafa;
+  --accent: #22d3ee;
+  --accent-ink: #04171b;
+  --grad: linear-gradient(120deg, #2dd4bf 0%, #22d3ee 42%, #38bdf8 100%);
+}
+
 html,
 body {
-  background-color: #1e1b4b;
-  background-image: linear-gradient(
-    to bottom right,
-    #4c1d95,
-    #1e3a8a,
-    #312e81
-  );
-  background-attachment: fixed;
+  background-color: var(--base);
   min-height: 100%;
 }
 
@@ -45,62 +54,274 @@ body {
   overflow: hidden;
 }
 
-@keyframes blob-drift-1 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(60px, 40px) scale(1.1);
-  }
-  66% {
-    transform: translate(-20px, -30px) scale(0.95);
-  }
+/* ---------------------------------------------------------------------------
+   Interactive background: slow grid pan, a cursor spotlight that lights up the
+   grid lines in the accent hue, plus drifting accent blobs that ease toward the
+   pointer. Pointer offsets (--mx/--my) and spotlight (--px/--py) are set in JS.
+--------------------------------------------------------------------------- */
+.bg-grid {
+  position: absolute;
+  inset: -2px;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 48px 48px;
+  /* Static grid — panning it repainted a full-screen layer every frame for a
+     44s drift no one could perceive. Pure idle cost, removed. */
+  -webkit-mask-image: radial-gradient(
+    ellipse 90% 70% at 50% 22%,
+    #000 42%,
+    transparent 82%
+  );
+  mask-image: radial-gradient(
+    ellipse 90% 70% at 50% 22%,
+    #000 42%,
+    transparent 82%
+  );
 }
-
-@keyframes blob-drift-2 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(-50px, -40px) scale(1.08);
-  }
-  66% {
-    transform: translate(30px, 20px) scale(0.97);
-  }
+.bg-grid-hot {
+  position: absolute;
+  inset: -2px;
+  background-image:
+    linear-gradient(to right, rgba(56, 211, 238, 0.5) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(56, 211, 238, 0.5) 1px, transparent 1px);
+  background-size: 48px 48px;
+  /* Only repaints when the cursor moves (mask follows --px/--py) — interactive,
+     not idle cost. No pan needed. */
+  -webkit-mask-image: radial-gradient(
+    220px 220px at var(--px, 50%) var(--py, 40%),
+    #000 0%,
+    transparent 70%
+  );
+  mask-image: radial-gradient(
+    220px 220px at var(--px, 50%) var(--py, 40%),
+    #000 0%,
+    transparent 70%
+  );
 }
-
-@keyframes blob-pulse {
-  0%,
-  100% {
-    transform: translateX(-50%) scale(1);
-    opacity: 0.5;
-  }
-  50% {
-    transform: translateX(-50%) scale(1.15);
-    opacity: 0.8;
-  }
-}
-
-.blob-1 {
-  animation: blob-drift-1 18s ease-in-out infinite;
+.bg-blob {
+  position: absolute;
+  border-radius: 50%;
+  /* 60px (was 80px): still a soft glow, cheaper to rasterise. Blobs only move
+     when the pointer moves, so there is no idle cost — desktop-only, hidden on
+     phones where .app-bg reproduces the glow statically. */
+  filter: blur(60px);
   will-change: transform;
 }
-.blob-2 {
-  animation: blob-drift-2 22s ease-in-out infinite;
+.bg-blob-1 {
+  width: 46rem;
+  height: 46rem;
+  background: rgba(34, 211, 238, 0.16);
+  top: -16rem;
+  left: -12rem;
+  transform: translate(calc(var(--mx, 0) * 40px), calc(var(--my, 0) * 40px));
+  transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bg-blob-2 {
+  width: 42rem;
+  height: 42rem;
+  background: rgba(45, 212, 191, 0.13);
+  bottom: -18rem;
+  right: -10rem;
+  transform: translate(calc(var(--mx, 0) * -55px), calc(var(--my, 0) * -40px));
+  transition: transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bg-blob-3 {
+  width: 30rem;
+  height: 30rem;
+  background: rgba(56, 189, 248, 0.12);
+  top: 30%;
+  left: 44%;
+  transform: translate(calc(var(--mx, 0) * 30px), calc(var(--my, 0) * 24px));
+  transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Fine grain to kill gradient banding on the dark ground. */
+.bg-grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------------------------------------------------------------------------
+   Glow card: a slow, low-luminance cyan sheen glides the perimeter (a single
+   comet with a long faint tail — no bright hot core), over a faint static
+   outline. A cursor spotlight lifts the surface where the pointer sits.
+--------------------------------------------------------------------------- */
+@property --bd {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.glow-card {
+  position: relative;
+  --bd: 0deg;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  /* Static bloom halo: one paint, no per-frame cost, no mask/filter layer. This
+     replaces the old animated drop-shadow on ::before, which forced a per-frame
+     filtered recomposite of a masked layer and blanked the card on weak mobile
+     GPUs (the "disappearing card" bug). */
+  box-shadow: 0 0 24px -6px rgba(34, 211, 238, 0.18);
+}
+.glow-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.4px;
+  z-index: 1;
+  background:
+    conic-gradient(
+      from var(--bd) at 50% 50%,
+      transparent 0deg,
+      transparent 225deg,
+      rgba(45, 212, 191, 0.04) 265deg,
+      rgba(34, 211, 238, 0.1) 305deg,
+      rgba(34, 211, 238, 0.22) 335deg,
+      rgba(103, 232, 249, 0.42) 352deg,
+      rgba(125, 235, 250, 0.5) 358deg,
+      rgba(103, 232, 249, 0.42) 360deg
+    ),
+    linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  /* NO filter here. An animated filter on this masked element forces a per-frame
+     filtered recomposite that drops the layer (blank/black card) on weak mobile
+     GPUs. The card's soft bloom now comes from a static box-shadow on .glow-card.
+     The conic sheen reads fine without it. */
+  animation: border-move 22s linear infinite;
+}
+.glow-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 0.3s;
+  background: radial-gradient(
+    320px 320px at var(--cx, 50%) var(--cy, 0%),
+    rgba(56, 211, 238, 0.12),
+    transparent 65%
+  );
+}
+.glow-card:hover::after {
+  opacity: 1;
+}
+.glow-card > * {
+  position: relative;
+  z-index: 2;
+}
+@keyframes border-move {
+  to {
+    --bd: 360deg;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Reusable accent pieces.
+--------------------------------------------------------------------------- */
+.text-grad {
+  background: linear-gradient(
+    100deg,
+    #5eead4,
+    #22d3ee,
+    #38bdf8,
+    #818cf8,
+    #22d3ee,
+    #5eead4
+  );
+  background-size: 260% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* The live sweep is OFF by default. It repaints the full text area every
+     frame, and this class is used on the LCP headline — a continuous repaint
+     loop on the LCP element inflates Largest Contentful Paint. The static
+     gradient still reads premium. The sweep only switches on for capable,
+     fine-pointer devices (see @media below), where the headline is no longer
+     the LCP-critical first paint and the GPU can sustain it cheaply. */
+}
+
+/* Capable device + fine pointer (desktop/laptop): bring back the living sweep.
+   Touch / low-power devices keep the static gradient (handled separately by
+   the hover:none and .low-power rules, which never reach here). */
+@media (hover: hover) and (pointer: fine) {
+  .text-grad {
+    animation: text-flow 14s linear infinite;
+  }
+}
+@keyframes text-flow {
+  to {
+    background-position: 260% 0;
+  }
+}
+
+/* Loud gradient button: dark ink label for AA contrast on bright cyan.
+   The solid background-color is a fallback: the dark-ink label must stay
+   readable even if the gradient image ever fails to paint. */
+.btn-grad {
+  background-color: var(--accent);
+  background-image: linear-gradient(120deg, #2dd4bf, #22d3ee, #38bdf8);
+  color: var(--accent-ink);
+  box-shadow:
+    0 10px 30px -8px rgba(34, 211, 238, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.btn-grad:hover:not(:disabled) {
+  box-shadow:
+    0 14px 38px -8px rgba(34, 211, 238, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* Quiet secondary button for toggles. */
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  color: #cffafe;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: var(--line-strong);
+}
+
+/* CSS micro-interactions — a drop-in replacement for the old motion.button
+   whileHover:{y:-1} / whileTap:{scale:0.985}. Visually identical (1px rise,
+   ~1.5% press), but pure compositor transform: no JS, no rAF, no library.
+   One shared utility for every primary/ghost/gradient button on the page. */
+.btn-press {
+  transition:
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.3s ease-out,
+    border-color 0.2s ease-out;
   will-change: transform;
 }
-.blob-3 {
-  animation: blob-pulse 12s ease-in-out infinite;
-  will-change: transform, opacity;
+.btn-press:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+.btn-press:active:not(:disabled) {
+  transform: scale(0.985);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .blob-1,
-  .blob-2,
-  .blob-3 {
+  .bg-grid,
+  .bg-grid-hot,
+  .glow-card::before,
+  .text-grad {
     animation: none;
+  }
+  .bg-blob {
+    transition: none;
   }
 }
 
@@ -136,6 +357,23 @@ body {
   }
 }
 
+/* Section reveal — the ONLY mechanic for showing/hiding card sections (preview,
+   gallery, status message). Pure compositor (opacity + transform), one-shot on
+   mount via `both`. Unlike framer's height:0→auto it never depends on a JS rAF
+   that mobile image-decoding can starve, so a section is NEVER left invisible or
+   half-open. Under reduced-motion `animation:none` drops the fill entirely and
+   the element renders at its base opacity:1 — visible, not stuck at 0. */
+@keyframes section-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .animate-card-enter {
   animation: card-enter 650ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -148,10 +386,131 @@ body {
   animation: soft-fade 500ms ease-out both;
 }
 
+.animate-section-in {
+  animation: section-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Indeterminate download bar — a short segment sweeping the track, used when a
+   download response has no Content-Length so no real percentage is known. */
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+.animate-progress-indeterminate {
+  animation: progress-indeterminate 1.1s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-card-enter,
   .animate-fade-in-up,
-  .animate-soft-fade {
+  .animate-soft-fade,
+  .animate-section-in {
     animation: none;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Static ambient gradient — the page ground on EVERY device.
+
+   One paint, no animation, no blur elements, no fixed-attachment, so it costs
+   nothing per frame and never repaints on scroll. Cyan/teal glows pooled near
+   the hero, easing into graphite. On desktop the InteractiveBackground (grid +
+   drifting blobs + cursor spotlight) layers its live motion on top of this; on
+   mobile that field is switched off and this gradient is the whole background —
+   fancy, polished, and free.
+--------------------------------------------------------------------------- */
+.app-bg {
+  background-color: var(--base);
+  background-image:
+    radial-gradient(
+      58rem 34rem at 50% -6rem,
+      rgba(34, 211, 238, 0.16),
+      transparent 62%
+    ),
+    radial-gradient(
+      46rem 34rem at 100% 4rem,
+      rgba(56, 189, 248, 0.1),
+      transparent 58%
+    ),
+    radial-gradient(
+      44rem 34rem at 0% 22rem,
+      rgba(45, 212, 191, 0.11),
+      transparent 58%
+    );
+  background-repeat: no-repeat;
+}
+
+/* ---------------------------------------------------------------------------
+   CAPABILITY-BASED PERFORMANCE GUARD
+
+   We no longer blanket-disable effects by screen width (that punished flagships
+   and tablets). Instead we split effects into two tiers:
+
+   CHEAP (everywhere): one-shot entrance animations, the card's perimeter ring,
+     the static grid, grain, gradient TEXT (frozen), gradient fills. These are
+     one-paint or compositor-only and never cause jank.
+
+   HEAVY (capable devices only): the cursor spotlight grid, the drifting blurred
+     blobs, and the live gradient-text sweep. These continuously re-rasterise full
+     layers every frame. They drop on (a) coarse pointers via @media(hover:none)
+     — a touch screen can't use a cursor effect anyway, and (b) low-power-flagged
+     devices (the head script in layout.tsx sets .low-power on ≤4 cores / ≤4GB
+     RAM / Save-Data / slow net). A powerful desktop or tablet keeps the lot.
+
+   The result: a poor phone gets the full static look (fancy, no jank), and a
+   capable device loses nothing. No animation is removed from any tier.
+--------------------------------------------------------------------------- */
+
+/* Touch devices can't use pointer-driven effects — drop the spotlight layer and
+   the blob-follow (both are cursor-reactive). The blobs' static glow lives on
+   via .app-bg, so the look is unchanged. */
+@media (hover: none) {
+  .bg-blob,
+  .bg-grid-hot {
+    display: none !important;
+  }
+  /* Remove the perimeter conic sweep entirely on touch. Animating the @property
+     --bd angle regenerates the conic-gradient image every frame — a continuous
+     PAINT (not a compositor transform) on a masked border layer that janks weak
+     mobile GPUs. Merely freezing it parked the gradient's bright 352–360° stop at
+     the top edge, leaving a weird static hairline segment. Dropping the layer is
+     cleaner: the card keeps its base `border` + soft `box-shadow` bloom, so it
+     still reads as a defined, premium card — just without the moving ring. */
+  .glow-card::before {
+    display: none !important;
+  }
+  /* A full-screen mix-blend-mode: overlay layer forces a blend pass on every
+     composite (and on every scroll repaint). At 0.045 opacity the grain is
+     imperceptible on a phone screen — drop the whole layer on touch. */
+  .bg-grain {
+    display: none !important;
+  }
+}
+
+/* Low-power flag (≤4 cores / ≤4GB RAM / Save-Data / slow net): freeze the live
+   gradient-text sweep (a full-text-area repaint every frame), drop the perimeter
+   sheen and the cursor-reactive layers. Static gradient text still reads premium
+   and the one-shot entrance animations stay — they're cheap and compositor-only.
+   Capable devices are untouched. */
+.low-power .bg-blob,
+.low-power .bg-grid-hot,
+/* On a flagged weak device strip the static full-screen layers too: the masked
+   grid holds a viewport-sized rasterised layer in memory, and the grain adds a
+   blend pass. The .app-bg radial gradient alone carries the look — one paint,
+   no extra layers. */
+.low-power .bg-grid,
+.low-power .bg-grain {
+  display: none !important;
+}
+.low-power .text-grad {
+  animation: none !important;
+}
+/* Same as touch: drop the sheen layer, don't just freeze it (a parked bright
+   arc looks worse than no ring). Base border + box-shadow carry the card. */
+.low-power .glow-card::before {
+  display: none !important;
 }

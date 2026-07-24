@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Downloader } from '../../../lib/downloader'
 import { validateUrl, detectPlatform } from '../../../lib/validator'
+import { getCached, setCached } from '../../../lib/responseCache'
 
 export async function POST(request: NextRequest) {
   try {
-    const { url, type = 'video' } = await request.json()
+    const { url, type = 'video', quality, format } = await request.json()
+    const preferredQuality: 'hd' | 'sd' = quality === 'sd' ? 'sd' : 'hd'
+    const mode: 'auto' | 'audio' = format === 'audio' ? 'audio' : 'auto'
 
     if (!url) {
       return NextResponse.json(
@@ -18,16 +21,27 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error:
-            'Invalid URL. Please paste a TikTok, Twitter/X, Instagram, Facebook, or YouTube link.',
+            'Invalid URL. Please paste a link from a supported platform: TikTok, X, Instagram, Facebook, YouTube, Pinterest, Reddit, Threads, Snapchat, Twitch, or Vimeo.',
         },
         { status: 400 },
       )
     }
 
     const platform = detectPlatform(url)
+
+    // Serve an identical recent resolve from the warm-instance cache — skips a
+    // full extractor round-trip for immediate repeats (double-tap, HD/SD/MP3
+    // re-pick, Recent re-tap). Keyed on everything that changes the result. The
+    // cache only holds successes and expires fast (media URLs are ephemeral).
+    const cacheKey = `${type}|${preferredQuality}|${mode}|${url}`
+    const cached = getCached<Record<string, unknown>>(cacheKey)
+    if (cached) {
+      return NextResponse.json(cached, { headers: { 'X-Cache': 'HIT' } })
+    }
+
     console.log(`Processing ${platform} URL:`, url, 'Type:', type)
 
-    const downloader = new Downloader()
+    const downloader = new Downloader({ quality: preferredQuality, mode })
     const videoData = await downloader.downloadVideo(url)
 
     // Accept the result if it yielded any downloadable media: a video stream,
@@ -38,6 +52,7 @@ export async function POST(request: NextRequest) {
     if (
       !videoData ||
       (!videoData.downloadUrl &&
+        !videoData.musicUrl &&
         !videoData.isPhotoCarousel &&
         !hasImages &&
         !videoData.embedUrl)
@@ -77,7 +92,26 @@ export async function POST(request: NextRequest) {
     const proxyImage = (u: string) =>
       isInstagram && u ? `/api/image?url=${encodeURIComponent(u)}` : u
 
-    return NextResponse.json({
+    // Direct-download URLs: a Cobalt tunnel streams from any IP with
+    // Content-Disposition: attachment, so the browser can pull it straight down
+    // without our /api/video|audio proxy re-streaming every byte through the
+    // function. Only expose these for tunnels (never a raw CDN redirect, which
+    // needs the proxy for referer/content-type) and never for same-origin
+    // (/api/…) streams, which are already local.
+    const directVideoUrl =
+      videoData.tunnel &&
+      videoData.downloadUrl &&
+      !videoData.downloadUrl.startsWith('/')
+        ? videoData.downloadUrl
+        : undefined
+    const directAudioUrl =
+      videoData.tunnel &&
+      videoData.musicUrl &&
+      !videoData.musicUrl.startsWith('/')
+        ? videoData.musicUrl
+        : undefined
+
+    const payload = {
       success: true,
       downloadUrl: videoProxyUrl,
       audioUrl: audioProxyUrl,
@@ -93,6 +127,8 @@ export async function POST(request: NextRequest) {
         musicAuthor: videoData.musicAuthor,
         // Raw (non-proxied) URLs needed by the /api/slideshow renderer
         rawMusicUrl: videoData.musicUrl,
+        directVideoUrl,
+        directAudioUrl,
         images:
           videoData.images?.map((img) => ({
             ...img,
@@ -101,7 +137,12 @@ export async function POST(request: NextRequest) {
             selected: false,
           })) || [],
       },
-    })
+    }
+
+    // Cache the successful result for a short window (see responseCache).
+    setCached(cacheKey, payload)
+
+    return NextResponse.json(payload, { headers: { 'X-Cache': 'MISS' } })
   } catch (error) {
     console.error('Download error:', error)
     return NextResponse.json(

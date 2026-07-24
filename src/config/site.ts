@@ -4,7 +4,7 @@ export type SiteConfig = typeof siteConfig
 // the production domain. Any trailing slash is stripped so `${siteUrl}/path`
 // never produces a double slash.
 const siteUrl = (
-  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://socialdownload.org'
+  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://socialdownloader.dpdns.org'
 ).replace(/\/+$/, '')
 
 export const siteConfig = {
@@ -13,7 +13,7 @@ export const siteConfig = {
   tagline:
     'Download TikTok, X, Instagram, Facebook & YouTube videos without watermarks',
   description:
-    'Free, fast, and watermark-free downloader for TikTok, Twitter/X, Instagram, Facebook, and YouTube. Save HD videos, reels and Shorts, extract MP3 audio, and download photo carousels and slideshows with the original soundtrack — no login or install required.',
+    'Free, watermark-free downloader for TikTok, X, Instagram, Facebook & YouTube — save HD videos, Reels & Shorts, extract MP3 audio, or grab photo carousels.',
   url: siteUrl,
   ogImage: `${siteUrl}/opengraph-image`,
   ogImageAlt:
@@ -21,18 +21,18 @@ export const siteConfig = {
   locale: 'en_US',
   foundingYear: 2024,
   author: {
-    name: 'Nhan Vo',
-    url: 'https://vohuunhan.dpdns.org',
+    name: 'NhanVo',
+    url: 'https://vohuunhan.dpdns.org/',
     email: 'vnhan2808@gmail.com',
-    twitter: '@NhanVo',
+    twitter: 'NhanVo',
     jobTitle: 'Software Engineer',
   },
   links: {
-    twitter: 'https://twitter.com/NhanVo',
+    twitter: 'https://vohuunhan.dpdns.org/',
     github: 'https://github.com/NhanVo288/social-downloader',
-    portfolio: 'https://vohuunhan.dpdns.org',
+    portfolio: 'https://vohuunhan.dpdns.org/',
   },
-  twitterTag: '@NhanVo',
+  twitterTag: 'NhanVo',
   keywords: [
     // Primary intent
     'TikTok downloader',

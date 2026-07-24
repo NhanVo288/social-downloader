@@ -6,10 +6,55 @@ import {
   parseVideoId,
   detectPlatform,
   parseInstagramShortcode,
+  parseInstagramStory,
   parseYouTubeId,
+  type SupportedPlatform,
 } from './validator'
 import { getMediaReferer } from './proxyHeaders'
 import { ytdlpInfo } from './ytdlp'
+
+// Retry a flaky network op with exponential backoff + light jitter. Only retries
+// errors the caller marks retryable (429 / 5xx / timeouts) — a hard 404/private
+// post fails fast. Backoff is 400ms, 900ms, ~2s so a transient rate-limit or
+// cold-start on a public instance is ridden out instead of surfacing to the user.
+async function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  opts: { retries?: number; isRetryable?: (e: unknown) => boolean } = {},
+): Promise<T> {
+  const retries = opts.retries ?? 2
+  const isRetryable = opts.isRetryable ?? (() => true)
+  let lastError: unknown
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn(attempt)
+    } catch (e) {
+      lastError = e
+      if (attempt === retries || !isRetryable(e)) break
+      const base = 400 * Math.pow(2.2, attempt)
+      const jitter = base * 0.25 * ((attempt % 3) / 3)
+      await new Promise((r) => setTimeout(r, Math.round(base + jitter)))
+    }
+  }
+  throw lastError
+}
+
+// True for transient failures worth retrying: network timeouts/resets and HTTP
+// 429 / 5xx. A definitive 4xx (bad/private/removed post) is NOT retried.
+function isTransientError(e: unknown): boolean {
+  const err = e as { code?: string; response?: { status?: number } }
+  if (
+    err?.code === 'ECONNABORTED' ||
+    err?.code === 'ETIMEDOUT' ||
+    err?.code === 'ECONNRESET' ||
+    err?.code === 'ENOTFOUND'
+  ) {
+    return true
+  }
+  const status = err?.response?.status
+  if (typeof status === 'number') return status === 429 || status >= 500
+  // No response at all (network layer) — worth one more try.
+  return err instanceof Error && !('response' in (err as object))
+}
 
 // Loose shapes for Instagram's GraphQL / embed `shortcode_media` payload.
 // Only the fields we actually read are typed; everything else is ignored.
@@ -29,6 +74,19 @@ interface IgShortcodeMedia extends IgMediaNode {
   video_duration?: number
 }
 
+// Minimal shapes for the private reels_media API used by the story extractor.
+interface IgStoryItem {
+  pk?: string | number
+  id?: string
+  video_versions?: Array<{ url?: string }>
+  image_versions2?: { candidates?: Array<{ url?: string }> }
+  video_duration?: number
+}
+interface IgReel {
+  user?: { username?: string }
+  items?: IgStoryItem[]
+}
+
 // Instagram's GraphQL endpoint rejects requests that don't carry its anti-CSRF
 // tokens (csrftoken + lsd) — it bounces them to a "Page Not Found" HTML page.
 // The tokens are harvested from a homepage GET and cached briefly here to avoid
@@ -42,6 +100,22 @@ let igTokenCache: {
 } | null = null
 
 export class Downloader {
+  // Preferred video quality for the extractors that expose a quality knob
+  // (Cobalt's videoQuality, tikwm's hd flag). 'hd' = best available (default);
+  // 'sd' = a smaller data-saver rendition. Extractors that only ever return a
+  // single rendition ignore this.
+  private readonly videoQuality: 'hd' | 'sd'
+
+  // Extraction mode: 'auto' resolves the video (default), 'audio' pulls an
+  // audio-only stream (MP3) — the "YouTube → MP3" flow, routed through Cobalt's
+  // downloadMode:'audio' for every platform.
+  private readonly mode: 'auto' | 'audio'
+
+  constructor(opts?: { quality?: 'hd' | 'sd'; mode?: 'auto' | 'audio' }) {
+    this.videoQuality = opts?.quality === 'sd' ? 'sd' : 'hd'
+    this.mode = opts?.mode === 'audio' ? 'audio' : 'auto'
+  }
+
   private readonly userAgent =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -62,15 +136,23 @@ export class Downloader {
   // work from datacenter hosts (Vercel) for TikTok, and as a login-free source
   // for YouTube/Twitter/Instagram/Facebook.
   //
-  // The public instance is tried FIRST (it's warm and fast); a self-hosted
-  // instance (set COBALT_API_URL — e.g. a free Render deploy, see deploy/cobalt/)
-  // is the FALLBACK, used only when the public one fails or rate-limits. This
+  // The public instance is tried FIRST (it's warm and fast); self-hosted
+  // instances (set COBALT_API_URL — e.g. a free Render deploy, see deploy/cobalt/)
+  // are the FALLBACKS, used only when the public one fails or rate-limits. This
   // keeps a free fallback's cold-start latency and bandwidth off the hot path.
-  // (Other public instances were pruned — canine.tools needs a JWT, eepy.today
-  // 502s, 255x.ru has a broken cert — they only added dead timeouts.)
+  //
+  // COBALT_API_URL accepts a COMMA- or space-separated LIST, so the operator can
+  // chain several private instances for resilience (each tunnels the media, so
+  // any one that resolves the URL works). We only ship one open public instance
+  // by default — other public ones were pruned as dead weight (canine.tools
+  // needs a JWT, kwiatekmiki 403s, eepy.today/oceanofanything are down) since a
+  // dead instance only adds a timeout to every request. Probed 2026-07: only
+  // co.otomir23.me answers open POSTs.
   private readonly cobaltInstances = [
     'https://co.otomir23.me/',
-    process.env.COBALT_API_URL,
+    ...(process.env.COBALT_API_URL ?? '')
+      .split(/[\s,]+/)
+      .map((s) => s.trim()),
   ].filter((v): v is string => Boolean(v))
 
   // Public Instagram web app id — required by the GraphQL/web-API endpoints.
@@ -88,6 +170,12 @@ export class Downloader {
   // Main entry point: auto-detects platform and routes accordingly
   async downloadVideo(url: string): Promise<VideoData> {
     const platform = detectPlatform(url)
+
+    // Audio-only mode (the "→ MP3" flow) short-circuits every platform through
+    // Cobalt's audio tunnel — one path, MP3 out.
+    if (this.mode === 'audio') {
+      return this.downloadAudio(url, platform)
+    }
 
     if (platform === 'tiktok') {
       return this.downloadTikTok(url)
@@ -123,9 +211,160 @@ export class Downloader {
       return this.downloadFacebook(url)
     }
 
+    // Pinterest, Reddit, Threads, Snapchat, Twitch, Vimeo — no bespoke
+    // extractor; resolved generically through Cobalt (which tunnels the media
+    // so it plays/downloads from any IP, including Vercel).
+    const genericPlatforms: SupportedPlatform[] = [
+      'pinterest',
+      'reddit',
+      'threads',
+      'snapchat',
+      'twitch',
+      'vimeo',
+    ]
+    if (genericPlatforms.includes(platform)) {
+      return this.downloadGeneric(url, platform)
+    }
+
     throw new Error(
-      'Unsupported URL. Please use a TikTok, Twitter/X, Instagram, Facebook, or YouTube link.',
+      'Unsupported URL. Please paste a link from a supported platform (TikTok, X, Instagram, Facebook, YouTube, Pinterest, Reddit, Threads, Snapchat, Twitch, or Vimeo).',
     )
+  }
+
+  /**
+   * Audio-only extraction (MP3). Cobalt's downloadMode:'audio' returns an audio
+   * tunnel for every supported platform, so this is one path regardless of the
+   * source. Metadata is sparse from an audio tunnel, so title/author/thumbnail
+   * are enriched from the platform's public oEmbed where we have one (YouTube,
+   * TikTok) — the Recent list and result card then read like content, not a
+   * bare file. Throws a clear message when no audio stream can be produced.
+   */
+  private async downloadAudio(
+    url: string,
+    platform: SupportedPlatform,
+  ): Promise<VideoData> {
+    const result = await this.tryCobaltInstances(url)
+    if (!result || !result.musicUrl) {
+      throw new Error(
+        'Could not extract audio from this link. The post may be private, region-locked, or the audio source may be unavailable (YouTube blocks audio extraction from some networks).',
+      )
+    }
+
+    // Enrich sparse Cobalt metadata from the platform's public oEmbed.
+    let meta: { title?: string; author?: string; thumbnail?: string } = {}
+    if (platform === 'youtube') {
+      const videoId = parseYouTubeId(url)
+      const canonical = videoId
+        ? `https://www.youtube.com/watch?v=${videoId}`
+        : url
+      meta = await this.fetchYouTubeMeta(videoId, canonical)
+    } else if (platform === 'tiktok') {
+      meta = await this.fetchTikTokMeta(url)
+    }
+
+    const baseTitle = meta.title || result.title || 'Audio track'
+    return {
+      ...result,
+      title: baseTitle.endsWith(' (audio)') ? baseTitle : `${baseTitle} (audio)`,
+      author: meta.author || result.author || 'Unknown',
+      thumbnail: meta.thumbnail || result.thumbnail || '',
+      downloadUrl: '',
+      isPhotoCarousel: false,
+    }
+  }
+
+  /**
+   * Generic extractor for platforms without a bespoke path. Cobalt tunnels the
+   * media through its own server, so the returned URL isn't bound to a signed
+   * CDN session and streams from any IP — the only extraction path that works
+   * on a datacenter host (Vercel) for these sources. Handles single videos and
+   * image/gallery pickers (Cobalt returns a picker for multi-image posts).
+   */
+  private async downloadGeneric(
+    url: string,
+    platform: SupportedPlatform,
+  ): Promise<VideoData> {
+    const methods: Array<() => Promise<VideoData | null>> = []
+    // Vimeo has a clean, login-free config endpoint that returns direct mp4
+    // renditions — more reliable than the public Cobalt instance (which doesn't
+    // resolve Vimeo), so try it first.
+    if (platform === 'vimeo') methods.push(() => this.tryVimeo(url))
+    methods.push(() => this.tryCobaltInstances(url))
+
+    for (const method of methods) {
+      try {
+        const result = await method()
+        if (result && (result.downloadUrl || (result.images?.length ?? 0) > 0)) {
+          return result
+        }
+      } catch (e) {
+        console.warn(`${platform} method failed, trying next...`, e)
+      }
+    }
+    throw new Error(
+      `Could not download this ${platform} content. The post may be private, region-locked, unavailable, or not supported by our extractor.`,
+    )
+  }
+
+  /**
+   * Vimeo via the public player config (https://player.vimeo.com/video/<id>/
+   * config). For public videos this returns direct progressive mp4 renditions
+   * that stream from any IP — no login, no signed session. Honours the HD/SD
+   * quality preference by picking the highest / lowest rendition.
+   */
+  private async tryVimeo(url: string): Promise<VideoData | null> {
+    const id = url.match(/vimeo\.com\/(?:video\/)?(\d+)/)?.[1]
+    if (!id) return null
+    const response = await axios.get(
+      `https://player.vimeo.com/video/${id}/config`,
+      {
+        headers: { 'User-Agent': this.userAgent, Referer: 'https://vimeo.com/' },
+        timeout: 15000,
+        validateStatus: () => true,
+      },
+    )
+    if (response.status !== 200) return null
+    const data = response.data as {
+      video?: {
+        title?: string
+        duration?: number
+        owner?: { name?: string }
+        thumbs?: Record<string, string>
+      }
+      request?: {
+        files?: {
+          progressive?: Array<{ url?: string; height?: number }>
+        }
+      }
+    }
+
+    const progressive = (data.request?.files?.progressive ?? []).filter(
+      (f): f is { url: string; height?: number } => Boolean(f?.url),
+    )
+    if (progressive.length === 0) return null
+
+    const sorted = [...progressive].sort(
+      (a, b) => (a.height ?? 0) - (b.height ?? 0),
+    )
+    const chosen =
+      this.videoQuality === 'sd' ? sorted[0] : sorted[sorted.length - 1]
+
+    const v = data.video ?? {}
+    const thumbs = v.thumbs ?? {}
+    const thumbnail =
+      thumbs.base || thumbs['1280'] || thumbs['640'] || thumbs['960'] || ''
+
+    return {
+      id,
+      title: v.title || 'Vimeo Video',
+      url,
+      thumbnail,
+      duration: Math.round(v.duration || 0),
+      author: v.owner?.name || 'Vimeo',
+      description: '',
+      downloadUrl: chosen.url,
+      isPhotoCarousel: false,
+    }
   }
 
   /**
@@ -272,6 +511,17 @@ export class Downloader {
    * slideshow renderer.
    */
   private async downloadInstagram(url: string): Promise<VideoData> {
+    // Stories & highlights use a different (login-gated) endpoint than shortcode
+    // posts — detect and route them out first. `/s/…` share links redirect to a
+    // canonical /stories/highlights/… URL, so resolve those before parsing.
+    let storyCandidate = url
+    if (url.includes('/s/')) {
+      storyCandidate = await this.resolveRedirect(url)
+    }
+    const story =
+      parseInstagramStory(storyCandidate) || parseInstagramStory(url)
+    if (story) return this.downloadInstagramStory(story, url)
+
     let resolvedUrl = url
     if (url.includes('/share/') || url.includes('instagr.am')) {
       resolvedUrl = await this.resolveInstagramUrl(url)
@@ -360,6 +610,126 @@ export class Downloader {
     throw new Error(
       'Could not download Instagram content. The post may be private or unavailable, or the configured Instagram session (IG_SESSIONID) may have expired.',
     )
+  }
+
+  /**
+   * Instagram story / highlight extractor. Stories are only served to
+   * authenticated accounts, so this REQUIRES a configured IG_SESSIONID — without
+   * it we surface a clear, specific message rather than a generic failure. With
+   * a session it resolves the user's (or highlight's) reel via the private
+   * reels_media API and returns the matching item's video or image.
+   *
+   * Best-effort: Instagram rotates these endpoints, and stories expire after
+   * 24h, so failures degrade to an explanatory error.
+   */
+  private async downloadInstagramStory(
+    story: { username?: string; storyPk?: string; highlightId?: string },
+    originalUrl: string,
+  ): Promise<VideoData> {
+    if (!this.instagramSessionId) {
+      throw new Error(
+        'This is an Instagram story/highlight — Instagram only serves these to a logged-in account, so downloading them needs a configured Instagram session (IG_SESSIONID). Public posts and reels work without one.',
+      )
+    }
+
+    const { csrf } = await this.getInstagramTokens()
+    const cookie = [
+      `sessionid=${this.instagramSessionId}`,
+      csrf ? `csrftoken=${csrf}` : '',
+    ]
+      .filter(Boolean)
+      .join('; ')
+    const headers: Record<string, string> = {
+      'User-Agent': this.userAgent,
+      'X-IG-App-ID': this.instagramAppId,
+      Accept: '*/*',
+      Referer: 'https://www.instagram.com/',
+      Cookie: cookie,
+    }
+
+    // Resolve which reel to fetch: a highlight id directly, or the user id
+    // behind a username.
+    let reelId: string
+    if (story.highlightId) {
+      reelId = `highlight:${story.highlightId}`
+    } else if (story.username) {
+      const prof = await axios.get(
+        `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(
+          story.username,
+        )}`,
+        { headers, timeout: 15000, validateStatus: () => true },
+      )
+      const userId = prof.data?.data?.user?.id
+      if (!userId) {
+        throw new Error(
+          'Could not resolve that Instagram account (it may be private, or the session has expired).',
+        )
+      }
+      reelId = String(userId)
+    } else {
+      throw new Error('Unrecognised Instagram story link.')
+    }
+
+    const reels = await axios.get(
+      `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(
+        reelId,
+      )}`,
+      { headers, timeout: 20000, validateStatus: () => true },
+    )
+
+    const reelMap = (reels.data?.reels ?? {}) as Record<string, IgReel>
+    const reel: IgReel | undefined =
+      reelMap[reelId] ?? (Object.values(reelMap)[0] as IgReel | undefined)
+    const items = (reel?.items ?? []) as IgStoryItem[]
+    if (items.length === 0) {
+      throw new Error(
+        'No story items are available — the story may have expired (stories last 24 hours) or the account has none right now.',
+      )
+    }
+
+    // Prefer the exact item the link points at; otherwise take the first.
+    const item =
+      (story.storyPk &&
+        items.find(
+          (it) =>
+            String(it.pk) === story.storyPk ||
+            String(it.id ?? '').startsWith(story.storyPk as string),
+        )) ||
+      items[0]
+
+    const video = item?.video_versions?.[0]?.url
+    const image = item?.image_versions2?.candidates?.[0]?.url
+    const owner = reel?.user?.username || story.username || 'instagram'
+    const id = String(item?.pk ?? story.storyPk ?? Date.now())
+
+    if (video) {
+      return {
+        id,
+        title: `Instagram story by @${owner}`,
+        url: originalUrl,
+        thumbnail: image || '',
+        duration: Math.round(item?.video_duration || 0),
+        author: owner,
+        description: '',
+        downloadUrl: video,
+        isPhotoCarousel: false,
+      }
+    }
+    if (image) {
+      return {
+        id,
+        title: `Instagram story by @${owner}`,
+        url: originalUrl,
+        thumbnail: image,
+        duration: 0,
+        author: owner,
+        description: '',
+        downloadUrl: '',
+        images: [{ id: `${id}_0`, url: image, thumbnail: image }],
+        isPhotoCarousel: false,
+      }
+    }
+    throw new Error('Could not extract media from that story item.')
   }
 
   /**
@@ -617,10 +987,27 @@ export class Downloader {
       headers.Authorization = `Api-Key ${process.env.COBALT_API_KEY}`
     }
 
-    const response = await axios.post(
-      baseUrl,
-      { url, videoQuality: 'max', filenameStyle: 'basic' },
-      { headers, timeout: 12000 },
+    // Audio mode asks Cobalt for an audio-only MP3 tunnel (the "→ MP3" flow);
+    // otherwise a normal video tunnel at the preferred quality.
+    const body =
+      this.mode === 'audio'
+        ? {
+            url,
+            downloadMode: 'audio',
+            audioFormat: 'mp3',
+            filenameStyle: 'basic',
+          }
+        : {
+            url,
+            videoQuality: this.videoQuality === 'sd' ? '480' : 'max',
+            filenameStyle: 'basic',
+          }
+
+    // Retry transient failures (429 / 5xx / cold-start timeouts) before giving
+    // up on this instance and moving to the next.
+    const response = await withRetry(
+      () => axios.post(baseUrl, body, { headers, timeout: 12000 }),
+      { retries: 2, isRetryable: isTransientError },
     )
 
     const data = response.data
@@ -632,6 +1019,7 @@ export class Downloader {
     }
 
     if (data.status === 'tunnel' || data.status === 'redirect') {
+      const isAudio = this.mode === 'audio'
       return {
         id: Date.now().toString(),
         title: data.filename?.replace(/\.[^.]+$/, '') || 'Social Media Video',
@@ -640,7 +1028,14 @@ export class Downloader {
         duration: 0,
         author: 'Unknown',
         description: '',
-        downloadUrl: data.url,
+        // In audio mode the tunnel is an MP3 — hand it back as the music track
+        // (no video), so the API serves it through the audio path.
+        downloadUrl: isAudio ? '' : data.url,
+        ...(isAudio ? { musicUrl: data.url } : {}),
+        // A tunnel streams from any IP with Content-Disposition: attachment, so
+        // the browser can download it directly (bypassing our proxy). A
+        // `redirect` is a raw CDN URL — do NOT mark it direct-safe.
+        tunnel: data.status === 'tunnel',
       }
     }
 
@@ -846,7 +1241,7 @@ export class Downloader {
           count: 12,
           cursor: 0,
           web: 1,
-          hd: 1,
+          hd: this.videoQuality === 'sd' ? 0 : 1,
         },
         {
           headers: {
