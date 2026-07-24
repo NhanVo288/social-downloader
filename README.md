@@ -3,7 +3,7 @@
 > Tải video TikTok, Twitter/X, Instagram, Facebook và YouTube không dính watermark — hỗ trợ video HD, Reels, Shorts, MP3, bài đăng nhiều ảnh (carousel) và video slideshow MP4 được render bằng ffmpeg. Miễn phí, không cần đăng nhập, không giới hạn.
 
 ![Social Media Downloader — tải video HD, Reels, Shorts, MP3 và ảnh từ TikTok, X, Instagram, Facebook và YouTube không watermark](docs/social-preview.png)
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NhanVo288/social-downloader)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js&logoColor=white)](https://nextjs.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
